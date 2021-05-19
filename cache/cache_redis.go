@@ -3,6 +3,7 @@ package cache
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"github.com/garyburd/redigo/redis"
 	"reflect"
@@ -107,7 +108,8 @@ func (c *RedisStore) Get(key string, value interface{}) error {
 func (c *RedisStore) Set(key string, value interface{}, expires time.Duration) error {
 	conn := c.pool.Get()
 	defer conn.Close()
-	return c.invoke(conn.Do, key, value, expires)
+	valueBytes, _ := json.Marshal(value)
+	return c.invoke(conn.Do, key, valueBytes, expires)
 }
 
 //添加数据
@@ -121,7 +123,8 @@ func (c *RedisStore) Add(key string, value interface{}, expires time.Duration) e
 	if b { //如果key 已经存在
 		return ErrNotStored
 	} else {
-		return c.invoke(conn.Do, key, value, expires)
+		valueBytes, _ := json.Marshal(value)
+		return c.invoke(conn.Do, key, valueBytes, expires)
 	}
 
 }
@@ -150,7 +153,8 @@ func (c *RedisStore) Replace(key string, value interface{}, expires time.Duratio
 	if !b { //key值不存在
 		return ErrCacheMiss
 	}
-	err = c.invoke(conn.Do, key, value, expires)
+	valueBytes, _ := json.Marshal(value)
+	err = c.invoke(conn.Do, key, valueBytes, expires)
 	if value == nil { //空值不能保存
 		return ErrNotStored
 	} else {
@@ -209,7 +213,8 @@ func Get(key string) (error, interface{}) {
 func Set(key string, value interface{}, expires time.Duration) error {
 	conn := rstore.pool.Get()
 	defer conn.Close()
-	return rstore.invoke(conn.Do, key, value, expires)
+	valueBytes, _ := json.Marshal(value)
+	return rstore.invoke(conn.Do, key, valueBytes, expires)
 }
 
 //添加数据
@@ -223,7 +228,8 @@ func Add(key string, value interface{}, expires time.Duration) error {
 	if b { //如果key 已经存在
 		return ErrNotStored
 	} else {
-		return rstore.invoke(conn.Do, key, value, expires)
+		valueBytes, _ := json.Marshal(value)
+		return rstore.invoke(conn.Do, key, valueBytes, expires)
 	}
 
 }
@@ -252,7 +258,8 @@ func Replace(key string, value interface{}, expires time.Duration) error {
 	if !b { //key值不存在
 		return ErrCacheMiss
 	}
-	err = rstore.invoke(conn.Do, key, value, expires)
+	valueBytes, _ := json.Marshal(value)
+	err = rstore.invoke(conn.Do, key, valueBytes, expires)
 	if value == nil { //空值不能保存
 		return ErrNotStored
 	} else {

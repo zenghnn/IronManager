@@ -2,14 +2,17 @@ package IronManager
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/zenghnn/IronManager/cache"
 	"github.com/zenghnn/IronShard"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-const PerCacheSliceVolume = 100
+const PerCacheSliceVolume = 1000
 
 func (jav *Javis) Refresh2Cache(tbprefix string, key string) {
 	allUm := jav.CacheMapByTable[tbprefix].TableNames
@@ -17,29 +20,18 @@ func (jav *Javis) Refresh2Cache(tbprefix string, key string) {
 	fieldsArr := []string{}
 	typeCount := tbStruct.NumField()
 	for i := 0; i < typeCount; i++ {
-		//如果标识为无视字段就跳过
-		tagiron := tbStruct.Field(i).Tag.Get("iron")
-		if tagiron == "" || tagiron == "-" {
-			continue
-		}
-		//如果标识为json字段，就在字段存取时候转换一下
-		tagInfos := strings.Split(tagiron, ";")
 		column := ""
-		push2jsonField := false
-		for _, locStr := range tagInfos {
-			locarr := strings.Split(locStr, ":")
-			if locarr[0] == "isjson" && locarr[1] == "true" {
-				push2jsonField = true
-			}
-		}
-
 		tag := tbStruct.Field(i).Tag.Get("gorm")
-		tagInfos = strings.Split(tag, ";")
+		tagInfos := strings.Split(tag, ";")
 		column = ""
+		push2jsonField := false
 		for _, locStr := range tagInfos {
 			locarr := strings.Split(locStr, ":")
 			if locarr[0] == "column" {
 				column = locarr[1]
+			}
+			if locarr[0] == "type" && locarr[1] == "json" {
+				push2jsonField = true
 			}
 		}
 		fieldsArr = append(fieldsArr, column)
@@ -49,84 +41,93 @@ func (jav *Javis) Refresh2Cache(tbprefix string, key string) {
 	}
 	selectFields := strings.Join(fieldsArr, ",")
 	//首先把用户openid-userid 对应关系初始化，并存入redis
-	for _, tbname := range allUm {
-		//uOpen2Id := map[string]int64{}
-		locDatas := []map[string]interface{}{}
-		tableSumRows := 0
-		err := jav.Main_IS.DB.Table(tbname).Count(&tableSumRows).Error
-		if err != nil {
-			fmt.Println("create mainkey to userid err(1):", err.Error())
-			return
-		}
-		fortime := 0
-		if tableSumRows > 0 {
-			fortime = tableSumRows/CACHEO2U_LIMIT + 1
-		} else {
-			fortime = 0
-		}
-		//selectFields :=  "uid,open_id,account,acc_type"
-		for i := 0; i < fortime; i++ {
-			err = jav.Main_IS.DB.Table(tbname).Select(selectFields).Order(key).Offset(i * CACHEO2U_LIMIT).Limit(CACHEO2U_LIMIT).Find(&locDatas).Error
+	wgout := sync.WaitGroup{}
+	wgout.Add(len(allUm))
+	for outcount, tbname := range allUm {
+		go func(loctbname string, oocount int) {
+			locDatas := []RegularUse{}
+			tableSumRows := 0
+			err := jav.Main_IS.DB.Table(loctbname).Count(&tableSumRows).Error
 			if err != nil {
-				fmt.Println("create mainkey to userid err(2):", err.Error())
+				fmt.Println("create mainkey to userid err(1):", err.Error())
 				return
 			}
-			pushLoop(tbname, locDatas, key, jav.jsonFields)
-		}
+			fortime := 0
+			if tableSumRows > 0 {
+				fortime = tableSumRows/CACHEO2U_LIMIT + 1
+			} else {
+				fortime = 0
+			}
+			wgin := sync.WaitGroup{}
+			wgin.Add(fortime)
+			for i := 0; i < fortime; i++ {
+				go func(batchIdx int) {
+					err = jav.Main_IS.DB.Table(loctbname).Select(selectFields).Order(key).Offset(batchIdx * CACHEO2U_LIMIT).Limit(CACHEO2U_LIMIT).Find(&locDatas).Error
+					if err != nil {
+						fmt.Println("create mainkey to userid err(2):", err.Error())
+						return
+					}
+					push2CacheBatch(loctbname, locDatas, key, batchIdx)
+					wgin.Done()
+				}(i)
+			}
+			wgin.Wait()
+			wgout.Done()
+		}(tbname, outcount)
+
 	}
 	//javis := Javis{Main_IS: ironShard,O2U: o2u,AllO2U: allO2UKey}
 	//MG_POOL[mgName] = &javis
 }
 
-func (jav *Javis) GetCacheByUid(tbprefix string, uid int64) (info interface{}, err error) {
+func (jav *Javis) GetCacheByUid(uid int64) (info map[string]interface{}, err error) {
 	uTbMainIdx, sliceIdx := GetCacheRouter(uid)
+	info = map[string]interface{}{}
 	//uTbMainIdx := int(uid/IronShard.TableCountLimit)
 	//sliceIdx := int(uid % IronShard.TableCountLimit) /PerCacheSliceVolume
-	locKey := tbprefix + "_" + strconv.Itoa(uTbMainIdx) + ":" + strconv.Itoa(sliceIdx)
-	cacheSliceBytes, err := cache.GetBytes(locKey)
-	if err != nil && err == cache.ErrCacheMiss {
-		return nil, nil
+	for tbprefix, _ := range jav.CacheMapByTable {
+		locKey := tbprefix + "_" + strconv.Itoa(uTbMainIdx) + ":" + strconv.Itoa(sliceIdx)
+		cacheSliceBytes, err := cache.GetBytes(locKey)
+		if err != nil && err == cache.ErrCacheMiss {
+			return nil, nil
+		}
+		dataSlice := map[int64]interface{}{}
+		err = json.Unmarshal(cacheSliceBytes, &dataSlice)
+		if err != nil {
+			return nil, err
+		}
+		info[tbprefix] = dataSlice[uid]
 	}
-	dataSlice := map[int64]interface{}{}
-	err = json.Unmarshal(cacheSliceBytes, &dataSlice)
-	if err != nil {
-		return
-	}
-	info = dataSlice[uid]
 	return
 }
 
-func (jav *Javis) GetOrCreateByTb(tbprefix string, uid int64) (info interface{}, err error) {
-	info, err = jav.GetCacheByUid(tbprefix, uid)
+func (jav *Javis) GetOrCreateByTb(tbprefix string, uid int64, initData map[string]interface{}) (info map[string]interface{}, err error) {
+	info, err = jav.GetCacheByUid(uid)
 	if err != nil {
 		return nil, err
-	} else if info == nil {
-		updateFields := []string{}
-		newData := map[string]interface{}{}
+	} else if info == nil || len(info) == 0 {
 		tbStruct := jav.tableStruct[tbprefix]
-		typeCount := tbStruct.NumField()
-		for i := 0; i < typeCount; i++ {
-			column := ""
-
-			tag := tbStruct.Field(i).Tag.Get("gorm")
-			tagInfos := strings.Split(tag, ";")
-			column = ""
-			typestr := ""
-			for _, locStr := range tagInfos {
-				locarr := strings.Split(locStr, ":")
-				if locarr[0] == "column" {
-					column = locarr[1]
-
-				}
-				if locarr[0] == "type" {
-					typestr = locarr[1]
-				}
+		newData := newUMData(tbStruct, jav.TbMainKey[tbprefix], uid, initData)
+		//判断是否大于当前的ID
+		shard := jav.CacheMapByTable[tbprefix]
+		uTbIdx, sliceIdx := GetCacheRouter(uid)
+		if uid > shard.MaxId {
+			//判断要不要建新的表
+			if shard.LastTableIdx < uTbIdx {
+				shard.NewTable()
 			}
-			updateFields = append(updateFields, column)
-			newData[column] = getValueByGormType(typestr)
+			cacheKey := shard.TbPrefix + "_" + strconv.Itoa(uTbIdx) + ":" + strconv.Itoa(sliceIdx)
+			_, err := cache.GetBytes(cacheKey)
+			if err != nil && err == cache.ErrCacheMiss {
+				cache.Add(cacheKey, map[int64]interface{}{uid: newData}, 0)
+			} else {
+				return nil, errors.New(fmt.Sprintf("find cache has exist cachekey[%s] create new table[%s_%d]", cacheKey, shard.TbPrefix, uTbIdx))
+			}
+		} else {
+			return nil, errors.New(fmt.Sprintf("no find uid cache & uid <= shard.MaxId:%s,uid:%d", tbprefix, uid))
 		}
-		uTbMainIdx, sliceIdx := GetCacheRouter(uid)
-		locKey := tbprefix + "_" + strconv.Itoa(uTbMainIdx) + ":" + strconv.Itoa(sliceIdx)
+
+		locKey := tbprefix + "_" + strconv.Itoa(uTbIdx) + ":" + strconv.Itoa(sliceIdx)
 		cacheSliceBytes, err := cache.GetBytes(locKey)
 		if err != nil && err == cache.ErrCacheMiss {
 			return nil, nil
@@ -136,27 +137,66 @@ func (jav *Javis) GetOrCreateByTb(tbprefix string, uid int64) (info interface{},
 		dataSlice[uid] = newData
 		err = cache.Replace(locKey, dataSlice, 0)
 		if err != nil {
-			return
+			return nil, errors.New(fmt.Sprintf("cache replace err tb:%s,uid:%d", tbprefix, uid))
 		}
 		//然后要把这里的更新标记出来，然后等待定时更新
-		javUpRelation, ok := jav.updateRelation[tbprefix]
+		javNewRelation, ok := jav.createRelation[tbprefix]
 		if !ok {
-			javUpRelation = map[int64][]string{}
+			javNewRelation = []int64{}
 		}
-		javUpRelation[uid] = updateFields
+		javNewRelation = append(javNewRelation, uid)
+		jav.createRelation[tbprefix] = javNewRelation
+		info = newData
 	}
-	return
+	return info, nil
+}
+
+func newUMData(tbStruct reflect.Type, priKey string, uid int64, initData map[string]interface{}) map[string]interface{} {
+	newData := map[string]interface{}{}
+	//tbStruct := jav.tableStruct[tbprefix]
+	typeCount := tbStruct.NumField()
+	for i := 0; i < typeCount; i++ {
+		column := ""
+		tag := tbStruct.Field(i).Tag.Get("gorm")
+		tagInfos := strings.Split(tag, ";")
+		column = ""
+		typestr := ""
+		for _, locStr := range tagInfos {
+			locarr := strings.Split(locStr, ":")
+			if locarr[0] == "column" {
+				column = locarr[1]
+			}
+			if locarr[0] == "type" {
+				typestr = locarr[1]
+			}
+		}
+		if column == priKey {
+			newData[column] = uid
+		} else {
+			//如果给出了初始化数据，那么就用已有的，否则使用默认
+			if initVal, exist := initData[column]; exist {
+				newData[column] = initVal
+			} else {
+				newData[column] = getDefaultValueByGormType(typestr)
+			}
+
+		}
+	}
+	return newData
 }
 
 func GetCacheRouter(uid int64) (uTbMainIdx int, sliceIdx int) {
-	uTbMainIdx = int(uid/IronShard.TableCountLimit) + 1
+	uTbMainIdx = int(uid / IronShard.TableCountLimit)
 	sliceIdx = int(uid%IronShard.TableCountLimit) / PerCacheSliceVolume
 	return
 }
 
-func getValueByGormType(gtype string) (defaultV interface{}) {
+func getDefaultValueByGormType(gtype string) (defaultV interface{}) {
 	if strings.Contains(gtype, "varchar") {
 		gtype = "varchar"
+	}
+	if strings.Contains(gtype, "int") { //这个可能会出现int(4) 这样的
+		gtype = "int"
 	}
 	if strings.Contains(gtype, "timestamp") {
 		gtype = "timestamp"
@@ -167,7 +207,7 @@ func getValueByGormType(gtype string) (defaultV interface{}) {
 	case "bigint":
 		defaultV = int64(0)
 	case "json":
-		defaultV = ""
+		defaultV = map[string]interface{}{}
 	case "varchar":
 	case "datetime":
 	case "timestamp":
@@ -176,39 +216,34 @@ func getValueByGormType(gtype string) (defaultV interface{}) {
 	return
 }
 
-func pushLoop(tbname string, dataList []map[string]interface{}, key string, needExchage []string) {
+func push2CacheBatch(tbname string, dataList []RegularUse, key string, batchIdx int) {
 	//先算出当前应该是这个表在内存(redis)中第几块
-	counter := 1
-	allCount := len(dataList)
-	var sliceMap map[int64]interface{}
-	for _, locdata := range dataList {
-		tableInRedisSlice := counter / PerCacheSliceVolume
-		yushu := counter % PerCacheSliceVolume
-		for _, tojsfield := range needExchage {
-			temp := map[string]interface{}{}
-			json.Unmarshal([]byte(locdata[tojsfield].(string)), &temp)
-			locdata[tojsfield] = temp
+	sliceMaps := map[string]map[int64]interface{}{}
+	for idx, locdata := range dataList {
+		tableInRedisSlice := batchIdx*(CACHEO2U_LIMIT/PerCacheSliceVolume) + (idx / PerCacheSliceVolume)
+		locKey := tbname + ":" + strconv.Itoa(tableInRedisSlice)
+		theUmdata, exist := sliceMaps[locKey]
+		if !exist {
+			theUmdata = map[int64]interface{}{}
 		}
-		sliceMap[locdata[key].(int64)] = locdata
-		if yushu == 0 || allCount == counter { //整数时把整个一起放入
-			locKey := tbname + ":" + strconv.Itoa(tableInRedisSlice)
-			err, _ := cache.Get(locKey)
-			if err == cache.ErrCacheMiss {
-				err = cache.Add(locKey, sliceMap, 0)
-				if err != nil {
-					fmt.Println("create mainkey to userid err(3):", err.Error())
-					return
-				}
-			} else {
-				//data2map, _ := json.Marshal(sliceMap)
-				err = cache.Replace(locKey, sliceMap, 0)
-				if err != nil {
-					fmt.Println("create mainkey to userid err(4):", err.Error())
-					return
-				}
+		theUmdata[locdata.Uid] = locdata
+		sliceMaps[locKey] = theUmdata
+	}
+
+	for cacheKey, m := range sliceMaps {
+		err, _ := cache.Get(cacheKey)
+		if err == cache.ErrCacheMiss {
+			err = cache.Add(cacheKey, m, 0)
+			if err != nil {
+				fmt.Println("create mainkey to userid err(3):", err.Error())
+				return
 			}
-			sliceMap = map[int64]interface{}{}
+		} else {
+			err = cache.Replace(cacheKey, m, 0)
+			if err != nil {
+				fmt.Println("create mainkey to userid err(4):", err.Error())
+				return
+			}
 		}
-		counter++
 	}
 }
