@@ -74,7 +74,6 @@ func (jav *Javis) Refresh2Cache(tbprefix string, key string) {
 			wgin.Wait()
 			wgout.Done()
 		}(tbname, outcount)
-
 	}
 	//javis := Javis{Main_IS: ironShard,O2U: o2u,AllO2U: allO2UKey}
 	//MG_POOL[mgName] = &javis

@@ -139,7 +139,7 @@ func (jav *Javis) CreateTableCahe(tbPrefix string, priKey string, fieldSql strin
 	jav.CacheMapByTable[tbPrefix] = &ironShard
 	jav.tableStruct[tbPrefix] = tbStruct
 	jav.TbMainKey[tbPrefix] = priKey
-	jav.Refresh2Cache(tbPrefix, priKey)
+	//jav.Refresh2Cache(tbPrefix, priKey)
 }
 
 //在主表创建一个新的用户时候
@@ -196,14 +196,14 @@ func (jav *Javis) CreateUserMain(openid string, initData UserM) (err error, newD
 	return nil, newData, regulerByTbName
 }
 
-func (jav *Javis) GetUM(uid int64) (umData interface{}, err error) {
+func (jav *Javis) GetUM(uid int64) (umData UserM, err error) {
 	umTbIdx, sliceIdx := GetCacheRouter(uid)
 	cacheKey := jav.Main_IS.TbPrefix + "_" + strconv.Itoa(umTbIdx) + ":" + strconv.Itoa(sliceIdx)
 	backBytes, err2 := cache.GetBytes(cacheKey)
 	if err2 != nil && err2 == cache.ErrCacheMiss {
-		return nil, errors.New("get um " + cacheKey + ")")
+		return umData, errors.New("get um " + cacheKey + ")")
 	}
-	umData = map[string]interface{}{}
+	umData = UserM{}
 	json.Unmarshal(backBytes, &umData)
 	return umData, nil
 }
@@ -215,9 +215,14 @@ func (jav *Javis) GetUMBytes(uid int64) (umDataBytes []byte, err error) {
 	if err2 != nil && err2 == cache.ErrCacheMiss {
 		return nil, errors.New("get um " + cacheKey + ")")
 	}
-	//umData = map[string]interface{}{}
-	//json.Unmarshal(backBytes,&umData)
-	return backBytes, nil
+	umsData := map[int64]map[string]interface{}{}
+	json.Unmarshal(backBytes, &umsData)
+	um := umsData[uid]
+	if um == nil {
+		return nil, errors.New("GetUMBytes not find?")
+	}
+	umDataBytes, err = json.Marshal(um)
+	return umDataBytes, nil
 }
 
 func pushUM2CacheBatch(tbname string, dataList []UserM, key string, batchIdx int, sm *shardmap.Map) {
@@ -237,13 +242,10 @@ func pushUM2CacheBatch(tbname string, dataList []UserM, key string, batchIdx int
 				if locdata.OpenId == "" {
 					continue
 				}
-				sm.Set(locdata.OpenId, locdata.OpenId)
+				sm.Set(locdata.OpenId, locdata.Id)
 			}
 		}
-		//cacheIdx := 0
-		//if yushu>0{
-		//	cacheIdx = 1 + tableInRedisSlice
-		//}
+
 		locKey := tbname + ":" + strconv.Itoa(tableInRedisSlice)
 		theUmdata, exist := sliceMaps[locKey]
 		if !exist {
