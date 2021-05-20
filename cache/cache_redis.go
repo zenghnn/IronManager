@@ -194,7 +194,7 @@ func GetBytes(key string) (bytes []byte, err error) {
 
 //获取实际值  比如存入为字符那么返回字符
 func Get(key string) (error, interface{}) {
-	var value interface{}
+	value := map[string]interface{}{}
 	conn := rstore.pool.Get()
 	defer conn.Close()
 	reply, err := conn.Do("get", key)
@@ -205,7 +205,8 @@ func Get(key string) (error, interface{}) {
 		return ErrCacheMiss, nil
 	}
 	bytes, err := redis.Bytes(reply, err)
-	err = deserialize(bytes, &value)
+	json.Unmarshal(bytes, &value)
+	//err = deserialize(bytes, &value)
 	return err, value //反序列化操作
 }
 
@@ -214,7 +215,16 @@ func Set(key string, value interface{}, expires time.Duration) error {
 	conn := rstore.pool.Get()
 	defer conn.Close()
 	valueBytes, _ := json.Marshal(value)
-	return rstore.invoke(conn.Do, key, valueBytes, expires)
+	//return rstore.invoke(conn.Do, key, valueBytes, expires)
+	var err error
+	if expires > 0 {
+		_, err = conn.Do("setex", key, int32(expires/time.Second), valueBytes)
+		return err
+	} else {
+		_, err = conn.Do("set", key, valueBytes)
+		return err
+	}
+	return err
 }
 
 //添加数据
@@ -229,9 +239,15 @@ func Add(key string, value interface{}, expires time.Duration) error {
 		return ErrNotStored
 	} else {
 		valueBytes, _ := json.Marshal(value)
-		return rstore.invoke(conn.Do, key, valueBytes, expires)
+		var err error
+		if expires > 0 {
+			_, err = conn.Do("setex", key, int32(expires/time.Second), valueBytes)
+			return err
+		} else {
+			_, err = conn.Do("set", key, valueBytes)
+			return err
+		}
 	}
-
 }
 
 //删除数据
@@ -259,10 +275,12 @@ func Replace(key string, value interface{}, expires time.Duration) error {
 		return ErrCacheMiss
 	}
 	valueBytes, _ := json.Marshal(value)
-	err = rstore.invoke(conn.Do, key, valueBytes, expires)
-	if value == nil { //空值不能保存
-		return ErrNotStored
+	//var err error
+	if expires > 0 {
+		_, err = conn.Do("setex", key, int32(expires/time.Second), valueBytes)
+		return err
 	} else {
+		_, err = conn.Do("set", key, valueBytes)
 		return err
 	}
 }

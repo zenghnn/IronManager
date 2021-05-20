@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/robfig/cron"
 	"github.com/zenghnn/IronManager/cache"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,12 +23,13 @@ func (jav *Javis) InitCron() {
 			rwLock.Lock()
 			copyUpRelation := jav.updateRelation
 			copyCreatRelation := jav.createRelation
+			//copyNewTb := jav.needNewTb
 			jav.updateRelation = map[string]map[int64][]int{}
 			jav.createRelation = map[string][]int64{}
+			jav.needNewTb = []string{}
 			rwLock.Unlock()
 
 			//要更新的数据
-			//updateSqls := []string{}
 			for tbprefix, user2update := range copyUpRelation {
 				tbStruct := jav.tableStruct[tbprefix]
 				mainKey := jav.TbMainKey[tbprefix]
@@ -87,23 +89,22 @@ func (jav *Javis) InitCron() {
 			for tbprefix, ids := range copyCreatRelation {
 				tbStruct := jav.tableStruct[tbprefix]
 				//mainKey := jav.TbMainKey[tbprefix]
-				locBuffer, ok := insertByTb[tbprefix]
-				locFields := tbFields[tbprefix]
-				thisTBisFirs := false
-				if !ok {
-					locBuffer = bytes.Buffer{}
-					//locBuffer.WriteString("insert into `")
-					thisTBisFirs = true
-				}
 				if len(ids) == 0 {
 					continue
 				}
+
 				for _, uid := range ids {
 					uTbMainIdx, sliceIdx := GetCacheRouter(uid)
 					tbname := tbprefix + "_" + strconv.Itoa(uTbMainIdx)
-					//if thisTBisFirs{
-					//	locBuffer.WriteString(tbname+"` (")
-					//}
+					thisTBisFirs := false
+					locBuffer, ok := insertByTb[tbname]
+					locFields := tbFields[tbname]
+					if !ok {
+						locBuffer = bytes.Buffer{}
+						//locBuffer.WriteString("insert into `")
+						thisTBisFirs = true
+					}
+
 					locKey := tbname + ":" + strconv.Itoa(sliceIdx)
 					cacheSliceBytes, err := cache.GetBytes(locKey)
 					if err != nil && err == cache.ErrCacheMiss {
@@ -129,14 +130,44 @@ func (jav *Javis) InitCron() {
 							}
 						}
 
-						if strings.Contains(typestr, "int") || typestr == "bigint" {
-							locBuffer.WriteString(fmt.Sprintf("%d", userData[column]))
-						} else if typestr == "json" {
-							columnBytes, err := json.Marshal(userData[column])
-							if err != nil {
-								continue
+						if userData[column] == nil {
+							locBuffer.WriteString("null")
+						} else if typestr == "bigint" || strings.Contains(typestr, "int") {
+							if columnType := reflect.TypeOf(userData[column]).Name(); columnType == "float64" {
+								if typestr == "bigint" {
+									locTempValue := int64(userData[column].(float64))
+									locBuffer.WriteString(fmt.Sprintf("%d", locTempValue))
+								} else if strings.Contains(typestr, "int") {
+									locTempValue := int(userData[column].(float64))
+									locBuffer.WriteString(fmt.Sprintf("%d", locTempValue))
+								} else if columnType == "string" {
+									locTempValue, err := strconv.ParseInt(userData[column].(string), 10, 64)
+									if err != nil {
+										fmt.Sprintf("insert data ParseInt err: uid:%d, columnType:%s,value:%s", uid, columnType, userData[column])
+									}
+									locBuffer.WriteString(fmt.Sprintf("%d", locTempValue))
+								} else {
+									locBuffer.WriteString(fmt.Sprintf("%f", userData[column]))
+								}
 							}
-							locBuffer.WriteString(fmt.Sprintf("'%s'", string(columnBytes)))
+						} else if typestr == "json" {
+							locValue := userData[column]
+							if locValue == nil {
+								locBuffer.WriteString("null")
+							} else {
+								columnBytes, err := json.Marshal(userData[column])
+								if err != nil {
+									continue
+								}
+								wantStr := fmt.Sprintf("'%s'", string(columnBytes))
+								locBuffer.WriteString(wantStr)
+							}
+						} else if strings.Contains(typestr, "time") || strings.Contains(typestr, "date") {
+							if userData[column] == nil || userData[column] == "" {
+								locBuffer.WriteString("null")
+							} else {
+								locBuffer.WriteString(fmt.Sprintf("'%s'", userData[column]))
+							}
 						} else {
 							locBuffer.WriteString(fmt.Sprintf("'%s'", userData[column]))
 						}
@@ -149,14 +180,14 @@ func (jav *Javis) InitCron() {
 							locFields = append(locFields, column)
 						}
 					}
-
+					insertByTb[tbname] = locBuffer
+					tbFields[tbname] = locFields
 				}
-				insertByTb[tbprefix] = locBuffer
-				tbFields[tbprefix] = locFields
+
 			}
 			for hereTbName, buffer := range insertByTb {
 				tbfiels := tbFields[hereTbName]
-				thissql := "insert into `" + hereTbName + "` (`" + strings.Join(tbfiels, "`,`") + ") values " + buffer.String()
+				thissql := "insert into `" + hereTbName + "` (`" + strings.Join(tbfiels, "`,`") + "`) values " + buffer.String()
 				r, size := utf8.DecodeLastRuneInString(thissql)
 				if r == utf8.RuneError && (size == 0 || size == 1) {
 					size = 0

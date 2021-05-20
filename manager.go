@@ -32,6 +32,7 @@ type Javis struct {
 	jsonFields      []string
 	updateRelation  map[string]map[int64][]int //  {user_m:[{100001:[1,3]}]}  1,3对应到tableStruct 里面字段的index
 	createRelation  map[string][]int64         //  {user_m:[100001,100005]}  要新建的用户ID记录下
+	needNewTb       []string                   //  ["user_m"]  要新建的用户ID记录下
 }
 
 var maxIdLock *sync.RWMutex
@@ -118,12 +119,12 @@ func CreateUserMain(db *gorm.DB, dbname string, redisCfg cache.RedisCfg, tbsql s
 
 	javis := Javis{Main_IS: ironShard, O2U: o2u, UMPrefix: tbPrefix, AllO2U: allO2UKey, CacheMapByTable: map[string]*IronShard.Shard{},
 		tableStruct: map[string]reflect.Type{}, jsonFields: []string{}, updateRelation: map[string]map[int64][]int{},
-		createRelation: map[string][]int64{}, TbMainKey: map[string]string{}}
+		createRelation: map[string][]int64{}, TbMainKey: map[string]string{}, needNewTb: []string{}}
 	ja = &javis
 	IronMan = &javis
 	javis.tableStruct[tbPrefix] = tbStruct
 	javis.TbMainKey[tbPrefix] = priKey
-	//javis.InitCron()  //启动定时更新
+	javis.InitCron() //启动定时更新
 	maxIdLock = new(sync.RWMutex)
 	return
 }
@@ -142,7 +143,7 @@ func (jav *Javis) CreateTableCahe(tbPrefix string, priKey string, fieldSql strin
 }
 
 //在主表创建一个新的用户时候
-func (jav *Javis) CreateUserMain(openid string, initData map[string]interface{}) (err error, newData interface{}, regulerByTbName map[string]interface{}) {
+func (jav *Javis) CreateUserMain(openid string, initData UserM) (err error, newData interface{}, regulerByTbName map[string]interface{}) {
 	newData = map[string]interface{}{}
 	_, exist := jav.O2U.Get(openid)
 	if exist {
@@ -152,21 +153,27 @@ func (jav *Javis) CreateUserMain(openid string, initData map[string]interface{})
 	uid := jav.Main_IS.MaxId + 1
 	calTbIdx := int(uid / IronShard.TableCountLimit)
 	umTbIdx, sliceIdx := GetCacheRouter(uid)
+	//tbStruct := jav.tableStruct[jav.Main_IS.TbPrefix]
+	initData.Id = uid
+	newData = initData
 	cacheKey := jav.Main_IS.TbPrefix + "_" + strconv.Itoa(umTbIdx) + ":" + strconv.Itoa(sliceIdx)
+	oldData := map[int64]interface{}{}
+	oldBytes, err2 := cache.GetBytes(cacheKey)
+	if err2 != nil && err2 == cache.ErrCacheMiss {
+		oldData[uid] = newData
+		err = cache.Add(cacheKey, oldData, 0)
+		if err != nil {
+			cache.Replace(cacheKey, oldData, 0)
+		}
+	} else {
+		json.Unmarshal(oldBytes, &oldData)
+		oldData[uid] = newData
+		err = cache.Replace(cacheKey, oldData, 0)
+	}
+	err = nil
 	if calTbIdx > jav.Main_IS.LastTableIdx { //如果已经最后一个表满了，那么就要新建一个表了
 		jav.Main_IS.NewTable() //新增一个此类表
-		//把空数据刷新到cache中
-		_, err2 := cache.GetBytes(cacheKey)
-		if err2 != nil && err2 == cache.ErrCacheMiss {
-			return errors.New("cache had this key? (create UM " + cacheKey + ")"), nil, nil
-		}
-	}
-	tbStruct := jav.tableStruct[jav.Main_IS.TbPrefix]
-	newData = newUMData(tbStruct, jav.TbMainKey[jav.Main_IS.TbPrefix], uid, initData)
-	err = cache.Add(cacheKey, map[int64]interface{}{uid: newData}, 0)
-	if err != nil {
-		cache.Replace(cacheKey, map[int64]interface{}{uid: newData}, 0)
-		//return errors.New("cache add new UM err:"+err.Error()),nil,nil
+		//jav.needNewTb = append(jav.needNewTb, jav.Main_IS.TbPrefix)
 	}
 	creatRelation, ok := jav.createRelation[jav.Main_IS.TbPrefix]
 	if !ok {
@@ -180,7 +187,8 @@ func (jav *Javis) CreateUserMain(openid string, initData map[string]interface{})
 
 	regulerByTbName = map[string]interface{}{}
 	for locTbPrefix, _ := range jav.CacheMapByTable {
-		regulerInfo, err1 := jav.GetOrCreateByTb(locTbPrefix, uid, initData)
+		reguler_use := RegularUse{Uid: uid, ShopGeomancy: "", RoomScheme: map[string]interface{}{}, ShopScheme: map[string]interface{}{}}
+		regulerInfo, err1 := jav.GetOrCreateByTb(locTbPrefix, uid, reguler_use)
 		if err1 == nil {
 			regulerByTbName[locTbPrefix] = regulerInfo
 		}
@@ -262,4 +270,35 @@ func pushUM2CacheBatch(tbname string, dataList []UserM, key string, batchIdx int
 		}
 	}
 
+}
+
+func createUMData(priKey string, uid int64, initData UserM) (UserM, error) {
+	//newData := map[string]interface{}{}
+	tbStruct := reflect.TypeOf(initData)
+	tbValues := reflect.ValueOf(initData)
+	typeCount := tbStruct.NumField()
+	for i := 0; i < typeCount; i++ {
+		column := ""
+		structField := tbStruct.Field(i)
+		tag := structField.Tag.Get("gorm")
+		tagInfos := strings.Split(tag, ";")
+		column = ""
+		typestr := ""
+		for _, locStr := range tagInfos {
+			locarr := strings.Split(locStr, ":")
+			if locarr[0] == "column" {
+				column = locarr[1]
+			}
+			if locarr[0] == "type" {
+				typestr = locarr[1]
+			}
+		}
+		locField := tbValues.Field(i)
+		if column == priKey {
+			locField.Set(reflect.ValueOf(uid))
+		} else if typestr == "json" {
+			locField.Set(reflect.ValueOf("{}"))
+		}
+	}
+	return initData, nil
 }

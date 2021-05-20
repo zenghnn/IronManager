@@ -80,64 +80,56 @@ func (jav *Javis) Refresh2Cache(tbprefix string, key string) {
 	//MG_POOL[mgName] = &javis
 }
 
-func (jav *Javis) GetCacheByUid(uid int64) (info map[string]interface{}, err error) {
+func (jav *Javis) GetCacheByUid(tbprefix string, uid int64) (info interface{}, err error) {
 	uTbMainIdx, sliceIdx := GetCacheRouter(uid)
-	info = map[string]interface{}{}
-	//uTbMainIdx := int(uid/IronShard.TableCountLimit)
-	//sliceIdx := int(uid % IronShard.TableCountLimit) /PerCacheSliceVolume
-	for tbprefix, _ := range jav.CacheMapByTable {
-		locKey := tbprefix + "_" + strconv.Itoa(uTbMainIdx) + ":" + strconv.Itoa(sliceIdx)
-		cacheSliceBytes, err := cache.GetBytes(locKey)
-		if err != nil && err == cache.ErrCacheMiss {
-			return nil, nil
-		}
-		dataSlice := map[int64]interface{}{}
-		err = json.Unmarshal(cacheSliceBytes, &dataSlice)
-		if err != nil {
-			return nil, err
-		}
-		info[tbprefix] = dataSlice[uid]
+	//info = map[string]interface{}{}
+	locKey := tbprefix + "_" + strconv.Itoa(uTbMainIdx) + ":" + strconv.Itoa(sliceIdx)
+	cacheSliceBytes, err := cache.GetBytes(locKey)
+	if err != nil && err == cache.ErrCacheMiss {
+		return nil, nil
 	}
-	return
-}
-
-func (jav *Javis) GetOrCreateByTb(tbprefix string, uid int64, initData map[string]interface{}) (info map[string]interface{}, err error) {
-	info, err = jav.GetCacheByUid(uid)
+	dataSlice := map[int64]interface{}{}
+	err = json.Unmarshal(cacheSliceBytes, &dataSlice)
 	if err != nil {
 		return nil, err
-	} else if info == nil || len(info) == 0 {
-		tbStruct := jav.tableStruct[tbprefix]
-		newData := newUMData(tbStruct, jav.TbMainKey[tbprefix], uid, initData)
+	}
+	return dataSlice[uid], nil
+}
+
+func (jav *Javis) GetOrCreateByTb(tbprefix string, uid int64, initData RegularUse) (info RegularUse, err error) {
+	cacheMap, err := jav.GetCacheByUid(tbprefix, uid)
+	if err != nil {
+		return info, err
+	} else if cacheMap == nil {
+		//tbStruct := jav.tableStruct[tbprefix]
+		newData := initData
 		//判断是否大于当前的ID
 		shard := jav.CacheMapByTable[tbprefix]
 		uTbIdx, sliceIdx := GetCacheRouter(uid)
+		cacheKey := ""
 		if uid > shard.MaxId {
 			//判断要不要建新的表
 			if shard.LastTableIdx < uTbIdx {
 				shard.NewTable()
-			}
-			cacheKey := shard.TbPrefix + "_" + strconv.Itoa(uTbIdx) + ":" + strconv.Itoa(sliceIdx)
-			_, err := cache.GetBytes(cacheKey)
-			if err != nil && err == cache.ErrCacheMiss {
-				cache.Add(cacheKey, map[int64]interface{}{uid: newData}, 0)
-			} else {
-				return nil, errors.New(fmt.Sprintf("find cache has exist cachekey[%s] create new table[%s_%d]", cacheKey, shard.TbPrefix, uTbIdx))
+				//jav.needNewTb = append(jav.needNewTb, jav.Main_IS.TbPrefix)
 			}
 		} else {
-			return nil, errors.New(fmt.Sprintf("no find uid cache & uid <= shard.MaxId:%s,uid:%d", tbprefix, uid))
+			return info, errors.New(fmt.Sprintf("no find uid cache & uid <= shard.MaxId:%s,uid:%d", tbprefix, uid))
 		}
-
-		locKey := tbprefix + "_" + strconv.Itoa(uTbIdx) + ":" + strconv.Itoa(sliceIdx)
-		cacheSliceBytes, err := cache.GetBytes(locKey)
+		cacheKey = shard.TbPrefix + "_" + strconv.Itoa(uTbIdx) + ":" + strconv.Itoa(sliceIdx)
+		oldBytes, err := cache.GetBytes(cacheKey)
+		oldData := map[int64]interface{}{}
 		if err != nil && err == cache.ErrCacheMiss {
-			return nil, nil
-		}
-		dataSlice := map[int64]interface{}{}
-		err = json.Unmarshal(cacheSliceBytes, &dataSlice)
-		dataSlice[uid] = newData
-		err = cache.Replace(locKey, dataSlice, 0)
-		if err != nil {
-			return nil, errors.New(fmt.Sprintf("cache replace err tb:%s,uid:%d", tbprefix, uid))
+			oldData[uid] = newData
+			cache.Add(cacheKey, oldData, 0)
+		} else {
+			json.Unmarshal(oldBytes, &oldData)
+			oldData[uid] = newData
+			//return nil, errors.New(fmt.Sprintf("find cache has exist cachekey[%s] create new table[%s_%d]", cacheKey, shard.TbPrefix, uTbIdx))
+			err = cache.Replace(cacheKey, oldData, 0)
+			if err != nil {
+				return info, errors.New(fmt.Sprintf("cache replace err tb:%s,uid:%d", tbprefix, uid))
+			}
 		}
 		//然后要把这里的更新标记出来，然后等待定时更新
 		javNewRelation, ok := jav.createRelation[tbprefix]
@@ -147,11 +139,15 @@ func (jav *Javis) GetOrCreateByTb(tbprefix string, uid int64, initData map[strin
 		javNewRelation = append(javNewRelation, uid)
 		jav.createRelation[tbprefix] = javNewRelation
 		info = newData
+	} else {
+		info = RegularUse{}
+		cacheBytes, _ := json.Marshal(cacheMap)
+		json.Unmarshal(cacheBytes, &info)
 	}
 	return info, nil
 }
 
-func newUMData(tbStruct reflect.Type, priKey string, uid int64, initData map[string]interface{}) map[string]interface{} {
+func newUMData(tbStruct reflect.Type, priKey string, uid int64, initData map[string]interface{}) (map[string]interface{}, error) {
 	newData := map[string]interface{}{}
 	//tbStruct := jav.tableStruct[tbprefix]
 	typeCount := tbStruct.NumField()
@@ -174,6 +170,7 @@ func newUMData(tbStruct reflect.Type, priKey string, uid int64, initData map[str
 			newData[column] = uid
 		} else {
 			//如果给出了初始化数据，那么就用已有的，否则使用默认
+
 			if initVal, exist := initData[column]; exist {
 				newData[column] = initVal
 			} else {
@@ -182,7 +179,7 @@ func newUMData(tbStruct reflect.Type, priKey string, uid int64, initData map[str
 
 		}
 	}
-	return newData
+	return newData, nil
 }
 
 func GetCacheRouter(uid int64) (uTbMainIdx int, sliceIdx int) {
