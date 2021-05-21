@@ -27,6 +27,7 @@ func (jav *Javis) InitCron() {
 			jav.updateRelation = map[string]map[int64][]int{}
 			jav.createRelation = map[string][]int64{}
 			jav.needNewTb = []string{}
+			jav.EmptyMarkData()
 			rwLock.Unlock()
 
 			//要更新的数据

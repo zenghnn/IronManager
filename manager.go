@@ -20,6 +20,8 @@ var (
 )
 
 const CACHEO2U_LIMIT = 10000
+const NEW_DATA_MARK_KEY = "new_data_mark_key"
+const MODIFY_DATA_MARK_KEY = "modify_data_mark_key"
 
 type Javis struct {
 	Main_IS         IronShard.Shard
@@ -175,19 +177,14 @@ func (jav *Javis) CreateUserMain(openid string, initData UserM) (err error, newD
 		jav.Main_IS.NewTable() //新增一个此类表
 		//jav.needNewTb = append(jav.needNewTb, jav.Main_IS.TbPrefix)
 	}
-	creatRelation, ok := jav.createRelation[jav.Main_IS.TbPrefix]
-	if !ok {
-		creatRelation = []int64{}
-	}
-	creatRelation = append(creatRelation, uid)
-	jav.createRelation[jav.Main_IS.TbPrefix] = creatRelation
+	jav.PushCreateMark(jav.Main_IS.TbPrefix, uid)
 	jav.Main_IS.MaxId = uid
 	jav.O2U.Set(openid, uid)
 	maxIdLock.Unlock()
 
 	regulerByTbName = map[string]interface{}{}
 	for locTbPrefix, _ := range jav.CacheMapByTable {
-		reguler_use := RegularUse{Uid: uid, ShopGeomancy: "", RoomScheme: map[string]interface{}{}, ShopScheme: map[string]interface{}{}}
+		reguler_use := RegularUse{Uid: uid, RoomScheme: map[string]interface{}{}, ShopScheme: map[string]interface{}{}}
 		regulerInfo, err1 := jav.GetOrCreateByTb(locTbPrefix, uid, reguler_use)
 		if err1 == nil {
 			regulerByTbName[locTbPrefix] = regulerInfo
@@ -223,6 +220,73 @@ func (jav *Javis) GetUMBytes(uid int64) (umDataBytes []byte, err error) {
 	}
 	umDataBytes, err = json.Marshal(um)
 	return umDataBytes, nil
+}
+
+func (jav *Javis) PushCreateMark(tbPrefix string, uid int64) {
+	creatRelation, ok := jav.createRelation[tbPrefix]
+	if !ok {
+		creatRelation = []int64{}
+	}
+	creatRelation = append(creatRelation, uid)
+	jav.createRelation[tbPrefix] = creatRelation
+	cache.Replace(NEW_DATA_MARK_KEY, jav.createRelation, 0)
+}
+
+func (jav *Javis) PushUpdateMark(tbPrefix string, uid int64, fieldIdxs []int) {
+	updateRelation, ok := jav.updateRelation[tbPrefix]
+	if !ok {
+		updateRelation = map[int64][]int{}
+	}
+	updateRelation[uid] = fieldIdxs
+	jav.updateRelation[tbPrefix] = updateRelation
+	cache.Replace(MODIFY_DATA_MARK_KEY, jav.updateRelation, 0)
+}
+
+//把redis的Mark更新到内存中
+func (jav *Javis) RefreshMarkData() {
+	updateMark, err := cache.GetBytes(MODIFY_DATA_MARK_KEY)
+	if err != nil {
+		fmt.Println("RefreshMarkData err " + err.Error())
+		return
+	}
+	updateData := map[string]map[int64][]int{}
+	json.Unmarshal(updateMark, &updateData)
+	jav.updateRelation = updateData
+	newMark, err := cache.GetBytes(NEW_DATA_MARK_KEY)
+	if err != nil {
+		fmt.Println("Refresh newDataMark err " + err.Error())
+		return
+	}
+	createdatas := map[string][]int64{}
+	json.Unmarshal(newMark, &createdatas)
+	jav.createRelation = createdatas
+}
+
+//初始化更新的标记数据
+func (jav *Javis) InitMarks() {
+	updateMark, err := cache.GetBytes(MODIFY_DATA_MARK_KEY)
+	if err != nil && err == cache.ErrCacheMiss {
+		updateData := map[string]map[int64][]int{}
+		json.Unmarshal(updateMark, &updateData)
+		jav.updateRelation = updateData
+		cache.Add(MODIFY_DATA_MARK_KEY, updateData, 0)
+	}
+
+	newMark, err := cache.GetBytes(NEW_DATA_MARK_KEY)
+	if err != nil && err == cache.ErrCacheMiss {
+		createdatas := map[string][]int64{}
+		json.Unmarshal(newMark, &createdatas)
+		jav.createRelation = createdatas
+		cache.Add(NEW_DATA_MARK_KEY, createdatas, 0)
+	}
+}
+
+//正式更新数据以后 清空redis中的标记
+func (jav *Javis) EmptyMarkData() {
+	updateData := map[string]map[int64][]int{}
+	cache.Replace(MODIFY_DATA_MARK_KEY, updateData, 0)
+	createdatas := map[string][]int64{}
+	cache.Replace(NEW_DATA_MARK_KEY, createdatas, 0)
 }
 
 func pushUM2CacheBatch(tbname string, dataList []UserM, key string, batchIdx int, sm *shardmap.Map) {
