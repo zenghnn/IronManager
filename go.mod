@@ -9,6 +9,8 @@ require (
 	github.com/tidwall/rhh v1.1.1 // indirect
 	github.com/tidwall/shardmap v0.0.0-20190927132224-c190691bd211
 	github.com/zenghnn/IronShard v0.0.0-00010101000000-000000000000
+	github.com/zenghnn/IronType v0.0.0-00010101000000-000000000000
 )
 
 replace github.com/zenghnn/IronShard => ../IronShard
+replace github.com/zenghnn/IronType => ../IronType

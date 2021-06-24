@@ -205,6 +205,18 @@ func (jav *Javis) GetUM(uid int64) (umData UserM, err error) {
 	return umData, nil
 }
 
+func (jav *Javis) GetByName(uid int64, name string) (umData RegularUse, err error) {
+	umTbIdx, sliceIdx := GetCacheRouter(uid)
+	cacheKey := name + "_" + strconv.Itoa(umTbIdx) + ":" + strconv.Itoa(sliceIdx)
+	backBytes, err2 := cache.GetBytes(cacheKey)
+	if err2 != nil && err2 == cache.ErrCacheMiss {
+		return umData, errors.New("get regu " + cacheKey + ")")
+	}
+	umData = RegularUse{}
+	json.Unmarshal(backBytes, &umData)
+	return umData, nil
+}
+
 func (jav *Javis) GetUMBytes(uid int64) (umDataBytes []byte, err error) {
 	umTbIdx, sliceIdx := GetCacheRouter(uid)
 	cacheKey := jav.Main_IS.TbPrefix + "_" + strconv.Itoa(umTbIdx) + ":" + strconv.Itoa(sliceIdx)
